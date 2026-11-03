@@ -1,0 +1,74 @@
+name: Build SelectData
+
+on:
+  push:
+    branches: [main]
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: SelectData-Windows
+            exe: SelectData.exe
+          - os: macos-latest
+            name: SelectData-Mac-AppleChip
+            exe: SelectData
+          - os: macos-15-intel
+            name: SelectData-Mac-Intel
+            exe: SelectData
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install libraries
+        run: python -m pip install -r requirements.txt pyinstaller
+
+      - name: Build the standalone program
+        run: python -m PyInstaller --onefile --name SelectData --collect-all pyreadstat selectdata.py
+
+      - name: Test the built program on a small test file
+        run: |
+          python make_test_data.py test.sav
+          ./dist/${{ matrix.exe }} info test.sav
+          ./dist/${{ matrix.exe }} test.sav --vars idno,cntry,agea,gndr,q1-q3 --country SE,NO --age 18-65 --gender Female --n 100 --out out.sav
+          ./dist/${{ matrix.exe }} test.sav --vars idno,q1 --country DK --first --n 10 --out out.csv
+          python -c "import pyreadstat; d,m=pyreadstat.read_sav('out.sav'); assert d.shape==(100,7), d.shape; assert set(d.cntry)<={'SE','NO'}; assert set(d.gndr)=={2.0}; print('OK', d.shape)"
+
+      - name: Pack (zip)
+        run: |
+          mkdir pack
+          cp dist/${{ matrix.exe }} README.md pack/
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            pwsh -Command "Compress-Archive -Path pack/* -DestinationPath ${{ matrix.name }}.zip"
+          else
+            chmod +x pack/SelectData
+            ditto -c -k pack ${{ matrix.name }}.zip
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ matrix.name }}.zip
+
+      - name: Attach to the Release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" "${{ matrix.name }}.zip" --clobber
